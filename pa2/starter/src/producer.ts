@@ -82,7 +82,10 @@ export async function connectProducerChannel(
   url: string,
   queueName: string,
 ): Promise<ConfirmChannel> {
-  throw new Error("TODO: connectProducerChannel is not implemented");
+  const connection = await amqplib.connect(url);
+  const channel = await connection.createConfirmChannel();
+  await channel.assertQueue(queueName, { durable: true });
+  return channel;
 }
 
 /**
@@ -107,7 +110,15 @@ export async function publishMessage(
   payload: unknown,
   options: { correlationId: string; mode: PublishMode },
 ): Promise<void> {
-  throw new Error("TODO: publishMessage is not implemented");
+  const msgContent = Buffer.from(JSON.stringify(payload));
+  const publishOptions = { correlationId: options.correlationId, persistent: options.mode === "confirmed" };
+  if (options.mode === "fire-and-forget") {
+    channel.publish("", queueName, msgContent, publishOptions);
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    channel.publish("", queueName, msgContent, publishOptions, (err) => { if (err) reject(err); else resolve(); });
+  });
 }
 
 // -------------------------------------------------------------- http api --
