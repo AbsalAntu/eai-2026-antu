@@ -231,7 +231,9 @@ const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: 
  *   b2b:    "SKU-PROD-XXX"          -> strip the "SKU-" prefix -> "PROD-XXX"
  */
 export function normalizeProductId(source: "web" | "mobile" | "b2b", rawId: string): string {
-  throw new Error("TODO: normalizeProductId is not implemented");
+  if (source === "mobile") return rawId.startsWith("PROD-") ? rawId : `PROD-${rawId}`;
+  if (source === "b2b") return rawId.replace(/^SKU-/, "");
+  return rawId;
 }
 
 /**
@@ -246,7 +248,7 @@ export function normalizeProductId(source: "web" | "mobile" | "b2b", rawId: stri
  * doing arithmetic on it.
  */
 export function toDecimalAmount(price: number): string {
-  throw new Error("TODO: toDecimalAmount is not implemented");
+  return price.toFixed(2);
 }
 
 export type EnrichResult =
@@ -272,7 +274,32 @@ export async function enrichFromPricing(
   productId: string,
   options: TranslateOptions,
 ): Promise<EnrichResult> {
-  throw new Error("TODO: enrichFromPricing is not implemented");
+  const apiKey = options.apiKey ?? DEFAULT_PRICING_API_KEY;
+  const base = options.pricingBaseUrl.replace(/\/+$/, "");
+  let res: Response;
+  try {
+    res = await fetch(`${base}/pricing/${encodeURIComponent(productId)}`, {
+      headers: { "X-API-Key": apiKey },
+    });
+  } catch {
+    return { status: "error", httpStatus: 0 };
+  }
+  if (res.status === 404) return { status: "unknown_product" };
+  if (!res.ok) return { status: "error", httpStatus: res.status };
+  try {
+    const body = (await res.json()) as { unitPrice: number; currency: string; taxRate: number; productName: string };
+    const price = Number(body.unitPrice);
+    if (!Number.isFinite(price)) return { status: "error", httpStatus: res.status };
+    return {
+      status: "ok",
+      unitPrice: toDecimalAmount(price),
+      currency: body.currency,
+      taxRate: body.taxRate,
+      productName: body.productName,
+    };
+  } catch {
+    return { status: "error", httpStatus: res.status };
+  }
 }
 
 /**
@@ -291,7 +318,30 @@ export async function enrichItems(
   lines: Array<{ productId: string; productName: string; quantity: number }>,
   options: TranslateOptions,
 ): Promise<{ items: CanonicalItem[]; warnings: TransformWarning[] }> {
-  throw new Error("TODO: enrichItems is not implemented");
+  const items: CanonicalItem[] = [];
+  const warnings: TransformWarning[] = [];
+  for (const line of lines) {
+    const r = await enrichFromPricing(line.productId, options);
+    if (r.status === "ok") {
+      items.push({
+        productId: line.productId,
+        productName: line.productName,
+        quantity: line.quantity,
+        unitPrice: r.unitPrice,
+        currency: r.currency,
+        taxRate: r.taxRate,
+      });
+    } else if (r.status === "unknown_product") {
+      warnings.push({ code: "UNKNOWN_PRODUCT", productId: line.productId, message: `Unknown product ${line.productId}` });
+    } else {
+      warnings.push({
+        code: "PRICING_API_ERROR",
+        productId: line.productId,
+        message: `Pricing API error (HTTP ${r.httpStatus}) for ${line.productId}`,
+      });
+    }
+  }
+  return { items, warnings };
 }
 
 /**
@@ -301,7 +351,7 @@ export async function enrichItems(
  * TODO is remembering the *1000 — this is seconds, not milliseconds.
  */
 export function epochSecondsToIso(epochSeconds: number): string {
-  throw new Error("TODO: epochSecondsToIso is not implemented");
+  return new Date(epochSeconds * 1000).toISOString();
 }
 
 /**
@@ -313,7 +363,10 @@ export function epochSecondsToIso(epochSeconds: number): string {
  * in your ADR — this is a real tolerant-reader judgment call, not a trick.
  */
 export function mapCurrencyCode(numericCode: number): string {
-  throw new Error("TODO: mapCurrencyCode is not implemented");
+  const map: Record<number, string> = { 978: "EUR", 840: "USD", 826: "GBP" };
+  const code = map[numericCode];
+  if (!code) throw new Error(`Unknown numeric currency code: ${numericCode}`);
+  return code;
 }
 
 /**
@@ -323,7 +376,10 @@ export function mapCurrencyCode(numericCode: number): string {
  * TODO: implement the mapping above.
  */
 export function mapMobileStatus(code: number): OrderStatus {
-  throw new Error("TODO: mapMobileStatus is not implemented");
+  const map: Record<number, OrderStatus> = { 1: "new", 2: "processing", 3: "shipped", 4: "delivered" };
+  const status = map[code];
+  if (!status) throw new Error(`Unknown mobile status code: ${code}`);
+  return status;
 }
 
 /**
@@ -332,7 +388,9 @@ export function mapMobileStatus(code: number): OrderStatus {
  * TODO: lowercase it. Decide what happens to a value you do not recognize.
  */
 export function mapB2BStatus(raw: string): OrderStatus {
-  throw new Error("TODO: mapB2BStatus is not implemented");
+  const value = raw.trim().toLowerCase();
+  if (value === "new" || value === "processing" || value === "shipped" || value === "delivered") return value;
+  throw new Error(`Unknown B2B status: ${raw}`);
 }
 
 /**
@@ -342,7 +400,13 @@ export function mapB2BStatus(raw: string): OrderStatus {
  * This is string work, not a library.
  */
 export function parseMobileAddress(addr: string): Address {
-  throw new Error("TODO: parseMobileAddress is not implemented");
+  const parts = addr.split(", ").map((x) => x.trim());
+  if (parts.length < 4) throw new Error(`Cannot parse mobile address: ${addr}`);
+  const country = parts[parts.length - 1];
+  const postalCode = parts[parts.length - 2];
+  const city = parts[parts.length - 3];
+  const street = parts.slice(0, parts.length - 3).join(", ");
+  return { street, city, postalCode, country };
 }
 
 /**
@@ -355,7 +419,7 @@ export function parseMobileAddress(addr: string): Address {
  * PA1's order file, applied to XML instead of a fixed-width record.
  */
 export function decodeB2BXmlBytes(bytes: Buffer): string {
-  throw new Error("TODO: decodeB2BXmlBytes is not implemented");
+  return new TextDecoder("windows-1257").decode(bytes);
 }
 
 // -------------------------------------------------------------- translators --
@@ -386,7 +450,39 @@ export async function translateWeb(
   webOrderPath: string,
   options: TranslateOptions,
 ): Promise<TransformResult> {
-  throw new Error("TODO: translateWeb is not implemented");
+  const input = JSON.parse(readFileSync(webOrderPath, "utf8")) as WebOrderInput;
+  const { items, warnings } = await enrichItems(
+    input.items.map((i) => ({
+      productId: normalizeProductId("web", String(i.productId)),
+      productName: String(i.productName),
+      quantity: Number(i.quantity),
+    })),
+    options,
+  );
+  const order: CanonicalOrder | null =
+    items.length === 0
+      ? null
+      : {
+          orderId: input.orderId,
+          orderType: input.orderType as CanonicalOrder["orderType"],
+          source: "web",
+          receivedAt: (options.now?.() ?? new Date()).toISOString(),
+          orderDate: new Date(input.orderDate).toISOString(),
+          customer: {
+            name: input.customer.name,
+            email: input.customer.email,
+            address: {
+              street: input.customer.address.street,
+              city: input.customer.address.city,
+              postalCode: input.customer.address.postalCode,
+              country: input.customer.address.country,
+            },
+          },
+          items,
+          currency: input.currency,
+          status: input.status as OrderStatus,
+        };
+  return { order, warnings };
 }
 
 /**
@@ -404,7 +500,34 @@ export async function translateMobile(
   mobileOrderPath: string,
   options: TranslateOptions,
 ): Promise<TransformResult> {
-  throw new Error("TODO: translateMobile is not implemented");
+  const input = JSON.parse(readFileSync(mobileOrderPath, "utf8")) as MobileOrderInput;
+  const { items, warnings } = await enrichItems(
+    input.items.map((i) => ({
+      productId: normalizeProductId("mobile", String(i.pid)),
+      productName: String(i.pname),
+      quantity: Number(i.qty),
+    })),
+    options,
+  );
+  const order: CanonicalOrder | null =
+    items.length === 0
+      ? null
+      : {
+          orderId: input.oid,
+          orderType: input.ot as CanonicalOrder["orderType"],
+          source: "mobile",
+          receivedAt: (options.now?.() ?? new Date()).toISOString(),
+          orderDate: epochSecondsToIso(input.ts),
+          customer: {
+            name: input.cust_name,
+            email: input.cust_email,
+            address: parseMobileAddress(input.addr),
+          },
+          items,
+          currency: mapCurrencyCode(input.cur),
+          status: mapMobileStatus(input.st),
+        };
+  return { order, warnings };
 }
 
 /**
@@ -435,7 +558,43 @@ export async function translateB2B(
   b2bOrderPath: string,
   options: TranslateOptions,
 ): Promise<TransformResult> {
-  throw new Error("TODO: translateB2B is not implemented");
+  const parsed = xmlParser.parse(decodeB2BXmlBytes(readFileSync(b2bOrderPath))) as ParsedB2BOrder;
+  const po = parsed.PurchaseOrder;
+  const raw = po.LineItems.LineItem;
+  const lineItems = (Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]) as Array<Record<string, unknown>>;
+  const { items, warnings } = await enrichItems(
+    lineItems.map((li) => ({
+      productId: normalizeProductId("b2b", String(li["@_sku"])),
+      productName: String(li["Description"] ?? ""),
+      quantity: Number(li["@_quantity"]),
+    })),
+    options,
+  );
+  const ship = po.BuyerParty.ShipToAddress;
+  const order: CanonicalOrder | null =
+    items.length === 0
+      ? null
+      : {
+          orderId: String(po["@_orderId"]),
+          orderType: String(po["@_orderType"]) as CanonicalOrder["orderType"],
+          source: "b2b",
+          receivedAt: (options.now?.() ?? new Date()).toISOString(),
+          orderDate: new Date(po["@_orderDate"]).toISOString(),
+          customer: {
+            name: String(po.BuyerParty.Name),
+            email: String(po.BuyerParty.ContactEmail),
+            address: {
+              street: String(ship.Street),
+              city: String(ship.City),
+              postalCode: String(ship.PostalCode),
+              country: String(ship["@_country"]),
+            },
+          },
+          items,
+          currency: String(po.LineItems["@_currency"]),
+          status: mapB2BStatus(String(po.Status)),
+        };
+  return { order, warnings };
 }
 
 // -------------------------------------------------------------------- main --
