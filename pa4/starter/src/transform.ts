@@ -402,9 +402,9 @@ export function mapB2BStatus(raw: string): OrderStatus {
 export function parseMobileAddress(addr: string): Address {
   const parts = addr.split(", ").map((x) => x.trim());
   if (parts.length < 4) throw new Error(`Cannot parse mobile address: ${addr}`);
-  const country = parts[parts.length - 1];
-  const postalCode = parts[parts.length - 2];
-  const city = parts[parts.length - 3];
+  const country = parts[parts.length - 1] as string;
+  const postalCode = parts[parts.length - 2] as string;
+  const city = parts[parts.length - 3] as string;
   const street = parts.slice(0, parts.length - 3).join(", ");
   return { street, city, postalCode, country };
 }
