@@ -1,6 +1,0 @@
-# Written by the running api. The graded artefact is the code, not the mirror.
-api/data/*
-!api/data/.gitkeep
-
-# Never commit these.
-node_modules/
