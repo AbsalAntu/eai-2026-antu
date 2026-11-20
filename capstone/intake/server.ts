@@ -1,3 +1,4 @@
+import { makeFollower } from "./follow";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import express from "express";
@@ -47,6 +48,7 @@ for (const key of Object.keys(idem)) {
 }
 saveJsonAtomic("idempotency-store.json", idem);
 saveJsonAtomic("orders.json", orders);
+const follower = makeFollower(orders, () => saveJsonAtomic("orders.json", orders));
 
 interface Outcome {
   status: number;
@@ -202,7 +204,8 @@ async function runPipeline(body: Buffer, isXml: boolean, contentType: string): P
 
 startService({
   name: "intake",
-  consume: {},
+  consume: { "intake.state.queue": follower.handler },
+  onConnect: follower.declare,
   routes: (app) => {
     app.post("/orders", express.raw({ type: () => true, limit: "2mb" }), async (req, res) => {
       const send = (o: Outcome) => {
