@@ -1,22 +1,29 @@
 import amqp from "amqplib";
-import type { Channel, ConsumeMessage } from "amqplib";
+import type { ConfirmChannel, ConsumeMessage } from "amqplib";
 import express from "express";
 
-export type Handler = (msg: ConsumeMessage, channel: Channel) => Promise<void>;
+export type Handler = (msg: ConsumeMessage, channel: ConfirmChannel) => Promise<void>;
 
 export interface ServiceOptions {
   name: string;
   consume: Record<string, Handler>;
   routes?: (app: express.Express) => void;
+  /** Runs after every (re)connect, before consuming: declare or bind what you need. */
+  onConnect?: (channel: ConfirmChannel) => Promise<void>;
 }
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL ?? "";
 const PORT = Number(process.env.PORT ?? "3000");
 
-let currentChannel: Channel | null = null;
+let currentChannel: ConfirmChannel | null = null;
+let brokerUp = false;
 
-export function getChannel(): Channel | null {
+export function getChannel(): ConfirmChannel | null {
   return currentChannel;
+}
+
+export function isBrokerUp(): boolean {
+  return brokerUp;
 }
 
 /** Step 0 handler: take the message off the queue and do nothing else. */
@@ -28,35 +35,75 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Publish and wait for the broker's confirm. Rejects with no channel, a nack, or no confirm in 5 s. */
+export function publishConfirmed(
+  exchange: string,
+  routingKey: string,
+  content: Buffer,
+  options: amqp.Options.Publish,
+): Promise<void> {
+  const channel = currentChannel;
+  if (!channel) return Promise.reject(new Error("broker_unavailable"));
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("publish not confirmed in time")), 5000);
+    try {
+      channel.publish(exchange, routingKey, content, options, (err) => {
+        clearTimeout(timer);
+        if (err) reject(err instanceof Error ? err : new Error("publish nacked"));
+        else resolve();
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      reject(err);
+    }
+  });
+}
+
+/** Fire and forget, for trace hops: never blocks and never throws. */
+export function publishNoWait(
+  exchange: string,
+  routingKey: string,
+  content: Buffer,
+  options: amqp.Options.Publish,
+): void {
+  const channel = currentChannel;
+  if (!channel) return;
+  try {
+    channel.publish(exchange, routingKey, content, options, () => undefined);
+  } catch {
+    // a lost hop must never fail the business operation
+  }
+}
+
 export function startService(opts: ServiceOptions): express.Express {
-  const state = { broker: false, consumers: {} as Record<string, number> };
-  for (const queue of Object.keys(opts.consume)) state.consumers[queue] = 0;
+  const consumers: Record<string, number> = {};
+  for (const queue of Object.keys(opts.consume)) consumers[queue] = 0;
 
   process.on("unhandledRejection", (err) => console.error(`[${opts.name}] unhandledRejection`, err));
   process.on("uncaughtException", (err) => console.error(`[${opts.name}] uncaughtException`, err));
 
+  // No global body parser: a route that needs the raw bytes parses them itself.
   const app = express();
-  app.use(express.json());
 
   app.get("/health", (_req, res) => {
-    const consuming = Object.values(state.consumers).every((n) => n > 0);
-    const ok = state.broker && consuming;
+    const consuming = Object.values(consumers).every((n) => n > 0);
+    const ok = brokerUp && consuming;
     res.status(ok ? 200 : 503).json({
       status: ok ? "ok" : "degraded",
-      checks: { broker: state.broker ? "up" : "down", consumers: { ...state.consumers } },
+      checks: { broker: brokerUp ? "up" : "down", consumers: { ...consumers } },
     });
   });
 
   opts.routes?.(app);
   app.listen(PORT, () => console.log(`[${opts.name}] listening on ${PORT}`));
 
-  // Connect, consume, and when the connection or the channel drops, do it all
-  // again. The process never exits: a restart of the broker is not our restart.
+  // Connect, consume, and when the connection or channel drops, start again.
+  // The process never exits: a broker restart is not our restart.
   void (async () => {
     for (;;) {
       try {
         const connection = await amqp.connect(RABBITMQ_URL);
-        const channel = await connection.createChannel();
+        const channel = await connection.createConfirmChannel();
         await channel.prefetch(10);
 
         const closed = new Promise<void>((resolve) => {
@@ -69,10 +116,11 @@ export function startService(opts: ServiceOptions): express.Express {
           });
         });
 
+        if (opts.onConnect) await opts.onConnect(channel);
+
         for (const [queue, handler] of Object.entries(opts.consume)) {
           await channel.consume(queue, async (msg) => {
             if (!msg) {
-              // the broker cancelled our consumer: start over
               channel.close().catch(() => undefined);
               return;
             }
@@ -87,19 +135,19 @@ export function startService(opts: ServiceOptions): express.Express {
               }
             }
           });
-          state.consumers[queue] = 1;
+          consumers[queue] = 1;
         }
 
         currentChannel = channel;
-        state.broker = true;
+        brokerUp = true;
         console.log(`[${opts.name}] connected to the broker`);
         await closed;
       } catch (err) {
         console.error(`[${opts.name}] broker not available: ${(err as Error).message}`);
       }
-      state.broker = false;
+      brokerUp = false;
       currentChannel = null;
-      for (const queue of Object.keys(state.consumers)) state.consumers[queue] = 0;
+      for (const queue of Object.keys(consumers)) consumers[queue] = 0;
       await sleep(1000);
     }
   })();
