@@ -1,0 +1,14 @@
+{
+  "name": "eai-2026-capstone",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "amqplib": "^0.10.4",
+    "express": "^4.21.2",
+    "fast-xml-parser": "^4.5.1",
+    "tsx": "^4.19.2"
+  }
+}
