@@ -24,87 +24,99 @@ export interface Envelope {
   state: State;
   code?: string;
   duplicateOf?: string;
+  occurredAt: string;
+}
 
-cat > orchestrator/steps.ts <<'EOF'
-const PAYMENT = process.env.PAYMENT_URL ?? "";
-const INVENTORY = process.env.INVENTORY_URL ?? "";
-const SHIPPING = process.env.SHIPPING_URL ?? "";
-const NOTIFICATION = process.env.NOTIFICATION_URL ?? "";
-const TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? "2500");
-
-export interface Order {
+export interface Saga {
+  businessKey: string;
   orderId: string;
-  orderType: string;
   source: string;
-  customer: { email: string };
-  items: Array<{ unitPrice: string; quantity: number }>;
+  orderType: string;
+  recipient: string;
+  state: State;
+  code?: string;
+  failedCode?: string;
+  duplicateOf?: string;
+  steps: Array<{ step: string; status: string; at: string }>;
+  compensations: Array<{ step: string; status: string; at: string }>;
+  operatorCompensation?: { state: string; code?: string; at: string; body: unknown };
+  outcome?: { routingKey: string; envelope: Envelope };
+  running: boolean;
+  owner: string;
+  lastHop?: string;
+  stuckHop?: string;
+  updatedAt: string;
 }
 
-export interface CallResult {
-  ok: boolean;
-  /** a 4xx: it will say no again */
-  permanent: boolean;
-  status: "success" | "failed" | "timeout";
-  code: string;
-  http: number;
+interface Store {
+  sagas: Record<string, Saga>;
+  businessKeys: Record<string, string>;
 }
 
-function cents(price: string): number {
-  const m = /^(-?)(\d+)\.(\d{2})$/.exec(price);
-  if (!m) throw new Error(`bad unitPrice: ${price}`);
-  const value = Number(m[2]) * 100 + Number(m[3]);
-  return m[1] ? -value : value;
+const store = loadJson<Store>("saga-store.json", { sagas: {}, businessKeys: {} });
+if (!store.sagas) store.sagas = {};
+if (!store.businessKeys) store.businessKeys = {};
+
+export const sagas = store.sagas;
+export const businessKeys = store.businessKeys;
+/** Outcomes that still have to be published: after a crash, or when the broker was away. */
+export const pendingPublish = new Set<string>();
+
+export const TERMINAL: ReadonlySet<string> = new Set([
+  "completed",
+  "failed",
+  "compensated",
+  "compensation_failed",
+  "needs_attention",
+  "duplicate",
+]);
+
+export function save(): void {
+  saveJsonAtomic("saga-store.json", store);
 }
 
-/** Whole cents as integers, formatted once at the end: "63.90", never a float. */
-export function amountOf(items: Array<{ unitPrice: string; quantity: number }>): string {
-  let total = 0;
-  for (const item of items) total += cents(item.unitPrice) * item.quantity;
-  const sign = total < 0 ? "-" : "";
-  const abs = Math.abs(total);
-  return `${sign}${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, "0")}`;
+export function envelopeOf(cid: string, saga: Saga, state: State, code?: string, duplicateOf?: string): Envelope {
+  const envelope: Envelope = {
+    correlationId: cid,
+    businessKey: saga.businessKey,
+    orderId: saga.orderId,
+    source: saga.source,
+    orderType: saga.orderType,
+    recipient: saga.recipient,
+    state,
+    occurredAt: new Date().toISOString(),
+  };
+  if (code) envelope.code = code;
+  if (duplicateOf) envelope.duplicateOf = duplicateOf;
+  return envelope;
 }
 
-export function planFor(orderType: string): string[] {
-  // b2b is invoiced: no payment. Route on orderType, never on source.
-  return orderType === "b2b"
-    ? ["inventory", "shipping", "notification"]
-    : ["payment", "inventory", "shipping", "notification"];
+/** Persist a new state together with the outcome event a redelivery would republish (R-4.2.18). */
+export function recordOutcome(cid: string, saga: Saga, state: State, code?: string, duplicateOf?: string): void {
+  saga.state = state;
+  if (code) saga.code = code;
+  else delete saga.code;
+  if (duplicateOf) saga.duplicateOf = duplicateOf;
+  saga.running = false;
+  const envelope = envelopeOf(cid, saga, state, code, duplicateOf);
+  saga.outcome = { routingKey: `order.${state}`, envelope };
+  saga.updatedAt = envelope.occurredAt;
+  save();
 }
 
+export function completedSteps(saga: Saga): string[] {
+  return saga.steps.filter((s) => s.status === "success").map((s) => s.step);
+}
 
-cat > orchestrator/events.ts <<'EOF'
-import { randomUUID } from "node:crypto";
-import { publishConfirmed } from "../shared/service";
-import { emitHop, newId } from "../shared/trace";
-import type { Envelope } from "./state";
+export function compensatedSteps(saga: Saga): string[] {
+  return saga.compensations.filter((s) => s.status === "success").map((s) => s.step);
+}
 
-/** Publish a lifecycle or outcome event to orders.outcome, with its saga.outcome hop (R-4.5.1, R-4.5.2). */
-export async function publishEvent(cid: string, routingKey: string, envelope: Envelope, cause: string | null): Promise<string> {
-  const hopId = newId();
-  const startedAt = Date.now();
-  let status: "success" | "failed" = "success";
-  try {
-    await publishConfirmed("orders.outcome", routingKey, Buffer.from(JSON.stringify(envelope)), {
-      persistent: true,
-      contentType: "application/json",
-      messageId: randomUUID(),
-      headers: { correlationId: cid, causationId: hopId },
-    });
-  } catch (err) {
-    status = "failed";
-    throw err;
-  } finally {
-    emitHop({
-      hopId,
-      correlationId: cid,
-      causationId: cause,
-      service: "orchestrator",
-      operation: "saga.outcome",
-      status,
-      startedAt,
-      finishedAt: Date.now(),
-    });
+// Stuck detection (R-4.7.1): at start, a saga whose steps were running under a
+// previous run is marked needs_attention. Nothing of it is ever re-run.
+for (const [cid, saga] of Object.entries(sagas)) {
+  if (saga.state === "processing" && saga.running && saga.owner !== RUN_ID) {
+    recordOutcome(cid, saga, "needs_attention");
+    pendingPublish.add(cid);
   }
-  return hopId;
 }
