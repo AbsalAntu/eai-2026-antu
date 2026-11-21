@@ -1,3 +1,4 @@
+import { registerDlq } from "./dlq";
 import { makeFollower } from "./follow";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -207,6 +208,7 @@ startService({
   consume: { "intake.state.queue": follower.handler },
   onConnect: follower.declare,
   routes: (app) => {
+    registerDlq(app);
     app.post("/orders", express.raw({ type: () => true, limit: "2mb" }), async (req, res) => {
       const send = (o: Outcome) => {
         if (o.retryAfter) res.set("Retry-After", String(o.retryAfter));
