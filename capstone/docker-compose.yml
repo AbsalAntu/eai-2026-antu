@@ -76,6 +76,10 @@ services:
       PORT: "8801"
       RABBITMQ_URL: amqp://eai:eai-capstone@rabbitmq:5672
       DATA_DIR: /data
+      MANAGEMENT_URL: http://rabbitmq:15672
+      MANAGEMENT_USER: eai
+      MANAGEMENT_PASSWORD: eai-capstone
+      ORCHESTRATOR_URL: http://orchestrator:8802
     volumes:
       - observer-data:/data
     mem_limit: 256m
